@@ -1,33 +1,123 @@
-pipeline{
-agent any
-stages 
-{
-stage('Build') 
-{
-steps{
-echo "Building the Code.........."
-bat "mvn clean"
+// Jenkinsfile in: devsecopsvj/JenkinsPipelineDemoProject
+pipeline {
+  agent any
+
+  // Use either githubPush() (with webhook) or pollSCM() (cron) below.
+  triggers {
+    // Uncomment ONE of these:
+    githubPush()                           // preferred if GitHub webhook is configured
+    // pollSCM('H/2 * * * *')                // fallback: poll every ~2 minutes
+  }
+
+  options {
+    timestamps()
+    ansiColor('xterm')
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+  }
+
+  tools {
+    // Configure these names in Jenkins Global Tool Configuration
+    jdk 'jdk-21'          // or the name you set for JDK 21
+    maven 'maven-3.9'     // or your Maven tool name
+  }
+
+  environment {
+    // Adjust if you use SSH instead of HTTPS
+    TESTS_REPO_URL = 'https://github.com/devsecopsvj/OpencartV121.git'
+    TESTS_BRANCH   = 'master'                         // change if needed
+    // If your tests need specific Maven flags, add here:
+    MAVEN_ARGS     = '-B -Dmaven.test.failure.ignore=false'
+    // Set to your Jenkins credential id if the tests repo is private
+    GITHUB_CREDS   = ''                              // e.g., 'github-pat' or leave empty for public
+  }
+
+  stages {
+    stage('Checkout pipeline repo (this)') {
+      steps {
+        // Checks out JenkinsPipelineDemoProject (the repo where this Jenkinsfile lives)
+        checkout scm
+      }
+    }
+
+    stage('Checkout tests repo (OpencartV121)') {
+      steps {
+        dir('tests') {
+          script {
+            if (env.GITHUB_CREDS?.trim()) {
+              checkout([
+                $class: 'GitSCM',
+                branches: [[name: "*/${env.TESTS_BRANCH}"]],
+                userRemoteConfigs: [[
+                  url: env.TESTS_REPO_URL,
+                  credentialsId: env.GITHUB_CREDS
+                ]],
+                extensions: [
+                  [$class: 'CloneOption', shallow: true, noTags: true, depth: 2]
+                ]
+              ])
+            } else {
+              // public repo path
+              git branch: env.TESTS_BRANCH, url: env.TESTS_REPO_URL
+            }
+          }
+        }
+      }
+    }
+
+    stage('Build dependencies (optional)') {
+      when { expression { return fileExists('tests/pom.xml') } }
+      steps {
+        dir('tests') {
+          script {
+            mvnRun "clean install -DskipTests ${env.MAVEN_ARGS}"
+          }
+        }
+      }
+    }
+
+    stage('Run Tests') {
+      steps {
+        dir('tests') {
+          script {
+            // common flags you might need for headless selenium:
+            // -Dheadless=true -Dwebdriver.http.factory=jdk-http-client
+            mvnRun "test ${env.MAVEN_ARGS}"
+          }
+        }
+      }
+    }
+
+    stage('Publish Reports') {
+      steps {
+        dir('tests') {
+          junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml'
+          // If you also produce TestNG results:
+          junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml, target/testng-results/*.xml'
+          archiveArtifacts artifacts: 'target/**', fingerprint: true, onlyIfSuccessful: false
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      script {
+        currentBuild.description = "Triggered by commits to JenkinsPipelineDemoProject; executed tests from OpencartV121 (${env.TESTS_BRANCH})"
+      }
+    }
+    failure {
+      echo 'Build failed. Check console log and test reports.'
+    }
+  }
 }
-}
-stage('Test') 
-{
-steps{
-echo "Testing the Code.........."
-bat "mvn test"
-}
-}
-stage('Compile') 
-{
-steps{
-echo "Compiling the Project.........."
-bat "mvn compile"
-}
-}
-stage('Deploy') 
-{
-steps{
-echo "Deploying the Project.........."
-}
-}
-}
+
+/**
+ * Helper to run Maven on Windows or Linux agents.
+ */
+def mvnRun(String args) {
+  if (isUnix()) {
+    sh "mvn ${args}"
+  } else {
+    bat "mvn ${args}"
+  }
 }
